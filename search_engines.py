@@ -4,7 +4,21 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict, Optional
 import time
+import random
 from config import Config
+
+# Selenium支持（可选）
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.chrome.service import Service
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
 
 class Paper:
@@ -207,85 +221,199 @@ class OpenReviewSearchEngine(SearchEngine):
 
 
 class GoogleScholarSearchEngine(SearchEngine):
-    """Google Scholar搜索引擎 (简化版，使用爬虫)"""
+    """Google Scholar搜索引擎（Selenium优先，带重试机制）"""
+    
+    def __init__(self):
+        super().__init__()
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ]
+        self.use_selenium = SELENIUM_AVAILABLE
     
     def search(self, keywords: str, start_date: Optional[str] = None, 
                end_date: Optional[str] = None) -> List[Paper]:
-        """
-        在Google Scholar上搜索论文
-        注意：这是简化实现，实际使用可能需要更复杂的爬虫或API
-        
-        Args:
-            keywords: 搜索关键词
-            start_date: 开始日期 (YYYY-MM-DD)
-            end_date: 结束日期 (YYYY-MM-DD)
-            
-        Returns:
-            论文列表
-        """
+        """搜索论文（优先使用Selenium）"""
         papers = []
         
+        # 优先使用Selenium
+        if self.use_selenium and SELENIUM_AVAILABLE:
+            print("🚀 使用Selenium浏览器模拟搜索...")
+            papers = self._search_with_selenium(keywords, start_date, end_date)
+            if papers:
+                return papers
+            print("⚠️ Selenium搜索失败")
+        else:
+            print("⚠️ Selenium不可用，请安装: pip install selenium webdriver-manager")
+            print("💡 或者使用ArXiv和OpenReview作为替代数据源")
+        
+        return papers
+    
+    def _search_with_selenium(self, keywords: str, 
+                             start_date: Optional[str] = None,
+                             end_date: Optional[str] = None) -> List[Paper]:
+        """使用Selenium模拟浏览器搜索"""
+        papers = []
+        driver = None
+        
         try:
-            # 构建搜索URL
-            base_url = "https://scholar.google.com/scholar"
-            params = {
-                'q': keywords,
-                'hl': 'en',
-                'as_sdt': '0,5'
-            }
+            print("📦 正在初始化浏览器...")
             
-            # 添加日期范围
+            # 配置Chrome选项
+            chrome_options = Options()
+            chrome_options.add_argument('--headless=new')  # 新版无头模式
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--disable-software-rasterizer')
+            chrome_options.add_argument(f'user-agent={random.choice(self.user_agents)}')
+            
+            # 反检测设置
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # 代理设置（如果需要，取消注释）
+            # chrome_options.add_argument('--proxy-server=http://127.0.0.1:7890')
+            
+            # 初始化浏览器
+            try:
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            except Exception as e:
+                print(f"⚠️ ChromeDriver初始化失败: {str(e)}")
+                print("💡 尝试使用系统Chrome...")
+                driver = webdriver.Chrome(options=chrome_options)
+            
+            # 设置脚本防止被检测为自动化
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': '''
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    })
+                '''
+            })
+            
+            driver.set_page_load_timeout(30)
+            
+            # 构建URL
+            query = keywords.replace(" ", "+")
+            url = f"https://scholar.google.com/scholar?q={query}&hl=zh-CN&num={min(20, self.max_results)}"
+            
             if start_date:
-                params['as_ylo'] = start_date[:4]
+                url += f"&as_ylo={start_date[:4]}"
             if end_date:
-                params['as_yhi'] = end_date[:4]
+                url += f"&as_yhi={end_date[:4]}"
             
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-            }
+            print(f"🔍 正在访问: {url[:80]}...")
             
-            response = requests.get(base_url, params=params, headers=headers, timeout=30)
+            # 访问页面
+            driver.get(url)
             
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                results = soup.find_all('div', class_='gs_ri')
-                
-                for result in results[:min(len(results), self.max_results)]:
-                    title_elem = result.find('h3', class_='gs_rt')
+            # 等待页面加载
+            time.sleep(random.uniform(3, 5))
+            
+            # 检查是否被拦截
+            page_source = driver.page_source.lower()
+            
+            if 'sorry' in page_source or 'unusual traffic' in page_source:
+                print("⚠️ Google检测到异常流量，需要验证")
+                print("💡 解决方案：")
+                print("   1. 等待10-15分钟后重试")
+                print("   2. 使用VPN/代理（取消代码中的proxy-server注释）")
+                print("   3. 临时使用ArXiv和OpenReview")
+                return papers
+            
+            if 'captcha' in page_source:
+                print("⚠️ 检测到验证码")
+                print("💡 建议启用有头模式（注释掉--headless）手动完成验证")
+                return papers
+            
+            # 获取页面源码
+            html = driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # 解析结果
+            results = soup.find_all(class_="gs_ri")
+            
+            if not results:
+                print("⚠️ 未找到搜索结果")
+                # 保存HTML用于调试
+                # with open('debug_scholar.html', 'w', encoding='utf-8') as f:
+                #     f.write(html)
+                return papers
+            
+            print(f"📄 找到 {len(results)} 个搜索结果，开始解析...")
+            
+            for idx, result in enumerate(results[:min(len(results), self.max_results)], 1):
+                try:
+                    title_elem = result.find('h3')
                     if not title_elem:
                         continue
-                        
-                    # 提取标题和链接
-                    title = title_elem.get_text()
-                    link_elem = title_elem.find('a')
-                    url = link_elem['href'] if link_elem else ''
-                    
-                    # 提取摘要
-                    abstract_elem = result.find('div', class_='gs_rs')
-                    abstract = abstract_elem.get_text() if abstract_elem else ''
-                    
-                    # 提取作者和发表信息
-                    authors_elem = result.find('div', class_='gs_a')
-                    authors_text = authors_elem.get_text() if authors_elem else ''
                     
                     paper = Paper(
-                        title=title.strip(),
-                        abstract=abstract.strip(),
-                        url=url,
-                        pdf_url=None,  # Google Scholar不直接提供PDF链接
+                        title="",
+                        abstract="",
+                        url="",
+                        pdf_url=None,
                         authors=[],
                         published=None,
                         source="Google Scholar"
                     )
+                    
+                    # 标题
+                    paper.title = title_elem.get_text().strip()
+                    paper.title = paper.title.replace('[HTML]', '').replace('[PDF]', '').replace('[图书]', '').strip()
+                    
+                    # 链接
+                    link = title_elem.find('a')
+                    if link and link.has_attr('href'):
+                        paper.url = link.get('href')
+                    
+                    # 摘要
+                    abstract_elem = result.find(class_="gs_rs")
+                    if abstract_elem:
+                        paper.abstract = abstract_elem.get_text().strip()
+                    else:
+                        paper.abstract = "摘要不可用"
+                    
+                    # 期刊/作者
+                    journal_elem = result.find(class_="gs_a")
+                    if journal_elem:
+                        paper.published = journal_elem.get_text()
+                    
+                    # 尝试提取PDF链接
+                    pdf_links = result.find_all('a', href=True)
+                    for link in pdf_links:
+                        href = link.get('href', '')
+                        if '.pdf' in href.lower() and href.startswith('http'):
+                            paper.pdf_url = href
+                            break
+                    
                     papers.append(paper)
                     
-                # 避免过于频繁的请求
-                time.sleep(2)
-                
-        except Exception as e:
-            print(f"Google Scholar搜索出错: {str(e)}")
+                except Exception as e:
+                    print(f"⚠️ 解析第{idx}篇论文时出错: {str(e)}")
+                    continue
             
+            if papers:
+                print(f"✅ 成功获取 {len(papers)} 篇论文")
+            else:
+                print("⚠️ 未能解析出任何论文")
+            
+        except Exception as e:
+            print(f"⚠️ Selenium搜索出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
+        
         return papers
+    
 
 
 class SearchManager:
