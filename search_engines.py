@@ -261,7 +261,7 @@ class GoogleScholarSearchEngine(SearchEngine):
             
             # 配置Chrome选项
             chrome_options = Options()
-            chrome_options.add_argument('--headless=new')  # 新版无头模式
+            # chrome_options.add_argument('--headless=new')  # 注释掉无头模式，启用可视化浏览器
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
@@ -317,17 +317,64 @@ class GoogleScholarSearchEngine(SearchEngine):
             page_source = driver.page_source.lower()
             
             if 'sorry' in page_source or 'unusual traffic' in page_source:
-                print("⚠️ Google检测到异常流量，需要验证")
-                print("💡 解决方案：")
-                print("   1. 等待10-15分钟后重试")
-                print("   2. 使用VPN/代理（取消代码中的proxy-server注释）")
-                print("   3. 临时使用ArXiv和OpenReview")
-                return papers
+                print("⚠️ Google检测到异常流量，需要人工验证")
+                print("🌐 浏览器窗口已打开，请手动完成验证...")
+                print("⏳ 等待用户完成验证（最多120秒）...")
+                
+                # 等待用户完成验证（检查URL是否改变或页面内容是否改变）
+                max_wait = 120  # 最多等待120秒
+                start_time = time.time()
+                verified = False
+                
+                while time.time() - start_time < max_wait:
+                    try:
+                        current_source = driver.page_source.lower()
+                        # 检查是否已经通过验证（验证页面消失）
+                        if 'sorry' not in current_source and 'unusual traffic' not in current_source:
+                            if 'scholar' in driver.current_url and 'gs_ri' in driver.page_source:
+                                print("✅ 验证成功！继续搜索...")
+                                verified = True
+                                break
+                        time.sleep(2)  # 每2秒检查一次
+                    except:
+                        pass
+                
+                if not verified:
+                    print("⏰ 验证超时，请稍后重试")
+                    return papers
+                
+                # 验证成功后重新获取页面内容
+                time.sleep(2)
+                page_source = driver.page_source.lower()
             
-            if 'captcha' in page_source:
-                print("⚠️ 检测到验证码")
-                print("💡 建议启用有头模式（注释掉--headless）手动完成验证")
-                return papers
+            if 'captcha' in page_source and 'gs_ri' not in driver.page_source:
+                print("⚠️ 检测到验证码，需要人工验证")
+                print("🌐 浏览器窗口已打开，请手动完成验证...")
+                print("⏳ 等待用户完成验证（最多120秒）...")
+                
+                # 等待验证码完成
+                max_wait = 120
+                start_time = time.time()
+                verified = False
+                
+                while time.time() - start_time < max_wait:
+                    try:
+                        current_source = driver.page_source.lower()
+                        # 检查是否已有搜索结果
+                        if 'gs_ri' in driver.page_source and 'captcha' not in current_source:
+                            print("✅ 验证成功！继续搜索...")
+                            verified = True
+                            break
+                        time.sleep(2)
+                    except:
+                        pass
+                
+                if not verified:
+                    print("⏰ 验证超时，请稍后重试")
+                    return papers
+                
+                # 验证成功后重新获取页面内容
+                time.sleep(2)
             
             # 获取页面源码
             html = driver.page_source
