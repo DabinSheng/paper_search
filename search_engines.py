@@ -274,7 +274,7 @@ class GoogleScholarSearchEngine(SearchEngine):
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
             # 代理设置（如果需要，取消注释）
-            # chrome_options.add_argument('--proxy-server=http://127.0.0.1:7890')
+            chrome_options.add_argument('--proxy-server=http://127.0.0.1:7890')
             
             # 初始化浏览器
             try:
