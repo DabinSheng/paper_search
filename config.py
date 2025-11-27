@@ -19,6 +19,11 @@ class Config:
     # 搜索配置
     MAX_RESULTS = 100  # 每次搜索最大结果数
     
+    # 智能过滤配置
+    ENABLE_SMART_FILTER = True  # 是否启用智能过滤
+    EXCLUDE_KEYWORDS = []  # 排除关键词列表（标题或摘要中包含这些词的论文会被过滤）
+    REQUIRE_KEYWORDS = []  # 必需关键词列表（至少包含一个的论文才会保留）
+    
     # 下载配置
     date_suffix = datetime.now().strftime('%Y%m%d')
     DEFAULT_DOWNLOAD_PATH = os.path.join(os.path.expanduser('~'), 'Downloads', f'papers_{date_suffix}')

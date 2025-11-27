@@ -21,6 +21,9 @@ downloads/
 # 下载历史记录
 paper_search_history.json
 
+# 搜索历史记录
+search_history.json
+
 # 系统文件
 .DS_Store
 .vscode/

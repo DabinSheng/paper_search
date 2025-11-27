@@ -6,6 +6,7 @@ from search_engines import search_manager
 from qwen_client import qwen_client
 from download_manager import download_manager
 from download_history import download_history
+from search_history import search_history
 
 
 # 页面配置
@@ -87,11 +88,22 @@ def perform_search(keywords, start_date, end_date, sources):
             keywords=keywords,
             start_date=start_date.strftime('%Y-%m-%d') if start_date else None,
             end_date=end_date.strftime('%Y-%m-%d') if end_date else None,
-            sources=sources
+            sources=sources,
+            exclude_keywords=Config.EXCLUDE_KEYWORDS if Config.ENABLE_SMART_FILTER else None,
+            require_keywords=Config.REQUIRE_KEYWORDS if Config.ENABLE_SMART_FILTER else None
         )
         st.session_state.search_results = results
         st.session_state.selected_papers = set()
         st.session_state.translations = {}
+        
+        # 保存搜索历史
+        exclude_keywords_str = ', '.join(Config.EXCLUDE_KEYWORDS) if Config.ENABLE_SMART_FILTER else ""
+        search_history.add_search(
+            keywords=keywords,
+            exclude_keywords=exclude_keywords_str,
+            sources=sources,
+            results_count=len(results)
+        )
     return results
 
 
@@ -335,12 +347,48 @@ def main():
     with st.sidebar:
         st.header("🔧 搜索设置")
         
+        # 搜索历史快捷选择
+        last_search = search_history.get_last_search()
+        if last_search:
+            with st.expander("📜 搜索历史", expanded=False):
+                st.caption("点击快速填充上次搜索")
+                if st.button(f"🔄 {last_search['keywords']}", key="load_last"):
+                    st.session_state['load_keywords'] = last_search['keywords']
+                    st.session_state['load_exclude'] = last_search.get('exclude_keywords', '')
+                    st.rerun()
+                
+                # 显示最近5次搜索
+                recent = search_history.get_recent_searches(5)
+                if len(recent) > 1:
+                    st.caption("最近搜索:")
+                    for idx, record in enumerate(recent[1:], 1):
+                        col1, col2 = st.columns([0.85, 0.15])
+                        with col1:
+                            if st.button(
+                                f"{record['keywords'][:30]}...", 
+                                key=f"history_{idx}",
+                                help=f"排除词: {record.get('exclude_keywords', '无')}"
+                            ):
+                                st.session_state['load_keywords'] = record['keywords']
+                                st.session_state['load_exclude'] = record.get('exclude_keywords', '')
+                                st.rerun()
+                        with col2:
+                            if st.button("🗑️", key=f"del_{idx}", help="删除"):
+                                search_history.remove_search(idx)
+                                st.rerun()
+        
         # 关键词输入
+        default_keywords = st.session_state.get('load_keywords', '')
         keywords = st.text_input(
             "搜索关键词",
+            value=default_keywords,
             placeholder="例如: machine learning, neural networks",
             help="输入要搜索的关键词"
         )
+        
+        # 清除加载的关键词（避免每次都自动填充）
+        if 'load_keywords' in st.session_state:
+            del st.session_state['load_keywords']
         
         # 日期范围
         st.subheader("📅 日期范围")
@@ -370,6 +418,60 @@ def main():
         
         # 高级设置
         st.subheader("⚙️ 高级设置")
+        
+        # 智能过滤
+        with st.expander("🎯 智能过滤", expanded=False):
+            enable_filter = st.toggle(
+                "启用智能过滤",
+                value=Config.ENABLE_SMART_FILTER,
+                help="过滤掉不相关的论文"
+            )
+            Config.ENABLE_SMART_FILTER = enable_filter
+            
+            if enable_filter:
+                # 快捷填充常用排除词
+                popular_excludes = search_history.get_popular_excludes(3)
+                if popular_excludes:
+                    st.caption("常用排除词:")
+                    cols = st.columns(len(popular_excludes))
+                    for idx, exclude in enumerate(popular_excludes):
+                        with cols[idx]:
+                            if st.button(f"📌 {exclude}", key=f"pop_ex_{idx}", help="点击填充"):
+                                st.session_state['load_exclude'] = exclude
+                                st.rerun()
+                
+                st.markdown("**排除关键词** (包含这些词的论文会被过滤)")
+                default_exclude = st.session_state.get('load_exclude', '\n'.join(Config.EXCLUDE_KEYWORDS))
+                exclude_text = st.text_area(
+                    "排除关键词",
+                    value=default_exclude,
+                    placeholder="每行一个关键词\n例如:\nhardware\nmemory chip\ncircuit",
+                    help="论文标题或摘要中包含这些词的会被过滤掉",
+                    label_visibility="collapsed"
+                )
+                Config.EXCLUDE_KEYWORDS = [k.strip() for k in exclude_text.split('\n') if k.strip()]
+                
+                # 清除加载的排除词
+                if 'load_exclude' in st.session_state:
+                    del st.session_state['load_exclude']
+                
+                st.markdown("**必需关键词** (至少包含一个的论文才保留)")
+                require_text = st.text_area(
+                    "必需关键词",
+                    value="\n".join(Config.REQUIRE_KEYWORDS),
+                    placeholder="每行一个关键词\n例如:\ndeep learning\nneural network\ntransformer",
+                    help="论文必须包含至少一个这些关键词",
+                    label_visibility="collapsed"
+                )
+                Config.REQUIRE_KEYWORDS = [k.strip() for k in require_text.split('\n') if k.strip()]
+                
+                # 显示当前过滤设置
+                if Config.EXCLUDE_KEYWORDS or Config.REQUIRE_KEYWORDS:
+                    st.markdown("---")
+                    if Config.EXCLUDE_KEYWORDS:
+                        st.caption(f"🚫 排除: {', '.join(Config.EXCLUDE_KEYWORDS[:3])}{'...' if len(Config.EXCLUDE_KEYWORDS) > 3 else ''}")
+                    if Config.REQUIRE_KEYWORDS:
+                        st.caption(f"✅ 必需: {', '.join(Config.REQUIRE_KEYWORDS[:3])}{'...' if len(Config.REQUIRE_KEYWORDS) > 3 else ''}")
         
         # 最大结果数
         max_results = st.slider(
@@ -406,10 +508,32 @@ def main():
         st.write(f"累计下载: **{total_downloads}** 篇论文")
         
         if total_downloads > 0:
-            if st.button("🗑️ 清空历史记录", use_container_width=True):
+            if st.button("🗑️ 清空下载历史", use_container_width=True):
                 download_history.clear_history()
-                st.success("历史记录已清空")
+                st.success("下载历史已清空")
                 st.rerun()
+        
+        # 搜索历史管理
+        st.subheader("📜 搜索历史管理")
+        total_searches = len(search_history.get_recent_searches())
+        st.write(f"历史搜索: **{total_searches}** 条")
+        
+        if total_searches > 0:
+            if st.button("🗑️ 清空搜索历史", use_container_width=True):
+                search_history.clear_history()
+                st.success("搜索历史已清空")
+                st.rerun()
+            
+            # 查看完整历史
+            with st.expander("查看完整历史"):
+                for idx, record in enumerate(search_history.get_recent_searches(20)):
+                    st.markdown(f"""
+                    **{idx+1}. {record['keywords']}**  
+                    排除词: {record.get('exclude_keywords', '无')}  
+                    结果: {record.get('results_count', 0)}篇 | 使用{record.get('search_count', 1)}次  
+                    时间: {record.get('last_search_time', '')[:16]}
+                    """)
+                    st.markdown("---")
         
         # 搜索按钮
         st.markdown("---")

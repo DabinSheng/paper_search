@@ -380,6 +380,27 @@ class GoogleScholarSearchEngine(SearchEngine):
             html = driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
             
+            # 尝试点击"更多"按钮展开所有摘要
+            try:
+                # 查找并点击所有"显示更多"按钮
+                show_more_buttons = driver.find_elements(By.CLASS_NAME, 'gs_rs')
+                for button_elem in show_more_buttons[:5]:  # 只展开前5个避免超时
+                    try:
+                        # 检查是否有"..."表示被截断
+                        if '...' in button_elem.text:
+                            # 尝试点击展开
+                            driver.execute_script("arguments[0].click();", button_elem)
+                            time.sleep(0.5)
+                    except:
+                        pass
+                
+                # 重新获取页面内容
+                time.sleep(1)
+                html = driver.page_source
+                soup = BeautifulSoup(html, 'html.parser')
+            except Exception as e:
+                print(f"  ℹ️ 无法展开摘要: {str(e)}")
+            
             # 解析结果
             results = soup.find_all(class_="gs_ri")
             
@@ -417,25 +438,69 @@ class GoogleScholarSearchEngine(SearchEngine):
                     if link and link.has_attr('href'):
                         paper.url = link.get('href')
                     
-                    # 摘要
+                    # 摘要 - 获取完整摘要（包括被隐藏的部分）
                     abstract_elem = result.find(class_="gs_rs")
                     if abstract_elem:
-                        paper.abstract = abstract_elem.get_text().strip()
+                        # 获取所有文本，包括可能被折叠的内容
+                        full_abstract = abstract_elem.get_text(separator=' ', strip=True)
+                        paper.abstract = full_abstract
+                        
+                        # 如果摘要以"..."结尾，说明被截断了
+                        if paper.abstract.endswith('...') or len(paper.abstract) < 150:
+                            # 对于arXiv论文，直接从arXiv获取完整摘要
+                            if paper.url and 'arxiv.org' in paper.url:
+                                print(f"  🔄 论文{idx}摘要被截断，从arXiv获取完整版...")
+                                enhanced_abstract = self._fetch_full_abstract(paper.url, driver)
+                                if enhanced_abstract and len(enhanced_abstract) > len(paper.abstract):
+                                    paper.abstract = enhanced_abstract
+                                    print(f"  ✅ 获取到完整摘要: {len(paper.abstract)} 字符")
+                        
+                        print(f"  📝 论文{idx}摘要: {paper.abstract[:100]}{'...' if len(paper.abstract) > 100 else ''}")
                     else:
                         paper.abstract = "摘要不可用"
                     
-                    # 期刊/作者
-                    journal_elem = result.find(class_="gs_a")
-                    if journal_elem:
-                        paper.published = journal_elem.get_text()
+                    # 作者和出版信息
+                    authors_elem = result.find(class_="gs_a")
+                    if authors_elem:
+                        author_info = authors_elem.get_text().strip()
+                        paper.published = author_info
+                        # 尝试提取作者名称
+                        if ' - ' in author_info:
+                            authors_part = author_info.split(' - ')[0]
+                            paper.authors = [a.strip() for a in authors_part.split(',')]
                     
-                    # 尝试提取PDF链接
-                    pdf_links = result.find_all('a', href=True)
-                    for link in pdf_links:
-                        href = link.get('href', '')
-                        if '.pdf' in href.lower() and href.startswith('http'):
-                            paper.pdf_url = href
-                            break
+                    # 提取PDF链接 - 改进策略
+                    # 1. 首先查找右侧的PDF链接（通常在gs_or_ggsm类中）
+                    pdf_link_elem = result.find_parent(class_='gs_r').find(class_='gs_or_ggsm') if result.find_parent(class_='gs_r') else None
+                    if pdf_link_elem:
+                        pdf_a = pdf_link_elem.find('a', href=True)
+                        if pdf_a and pdf_a.get('href'):
+                            href = pdf_a.get('href')
+                            if href.startswith('http'):
+                                paper.pdf_url = href
+                    
+                    # 2. 如果没找到，尝试在结果中查找所有包含PDF的链接
+                    if not paper.pdf_url:
+                        all_links = result.find_parent(class_='gs_r').find_all('a', href=True) if result.find_parent(class_='gs_r') else result.find_all('a', href=True)
+                        for link_elem in all_links:
+                            href = link_elem.get('href', '')
+                            link_text = link_elem.get_text().lower()
+                            # 查找明确标注为PDF的链接
+                            if ('[pdf]' in link_text or 'pdf' in link_text) and href.startswith('http'):
+                                paper.pdf_url = href
+                                break
+                            # 或者链接直接指向PDF文件
+                            elif '.pdf' in href.lower() and href.startswith('http'):
+                                paper.pdf_url = href
+                                break
+                    
+                    # 3. 智能PDF查找：如果论文URL是arXiv、Semantic Scholar等，尝试构建PDF链接
+                    if not paper.pdf_url and paper.url:
+                        paper.pdf_url = self._try_construct_pdf_url(paper.url)
+                    
+                    # 调试信息
+                    pdf_status = "✅" if paper.pdf_url else "❌"
+                    print(f"  {pdf_status} 论文{idx}: {paper.title[:50]}...")
                     
                     papers.append(paper)
                     
@@ -461,6 +526,71 @@ class GoogleScholarSearchEngine(SearchEngine):
         
         return papers
     
+    def _try_construct_pdf_url(self, url: str) -> Optional[str]:
+        """尝试从论文URL构建PDF链接"""
+        if not url:
+            return None
+        
+        try:
+            # arXiv: 将abs链接转换为pdf链接
+            if 'arxiv.org/abs/' in url:
+                return url.replace('/abs/', '/pdf/') + '.pdf'
+            
+            # Semantic Scholar
+            if 'semanticscholar.org/paper/' in url:
+                # Semantic Scholar的PDF需要通过API或重定向获取，这里先返回None
+                pass
+            
+            # ACM Digital Library
+            if 'dl.acm.org' in url and '/doi/' in url:
+                # ACM的PDF需要订阅，返回None
+                pass
+            
+            # IEEE Xplore
+            if 'ieeexplore.ieee.org' in url:
+                # IEEE的PDF需要订阅，返回None
+                pass
+                
+        except Exception as e:
+            print(f"⚠️ 构建PDF链接失败: {str(e)}")
+        
+        return None
+    
+    def _fetch_full_abstract(self, url: str, driver) -> Optional[str]:
+        """从论文原始页面获取完整摘要"""
+        if not url or not url.startswith('http'):
+            return None
+        
+        try:
+            # 对于arXiv链接，使用特殊处理
+            if 'arxiv.org/abs/' in url:
+                current_window = driver.current_window_handle
+                driver.execute_script("window.open('');")
+                driver.switch_to.window(driver.window_handles[-1])
+                
+                try:
+                    driver.get(url)
+                    time.sleep(2)
+                    
+                    # arXiv的摘要在blockquote.abstract元素中
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    abstract_elem = soup.find('blockquote', class_='abstract')
+                    if abstract_elem:
+                        # 移除"Abstract:"标签
+                        abstract_text = abstract_elem.get_text(strip=True)
+                        abstract_text = abstract_text.replace('Abstract:', '').strip()
+                        return abstract_text
+                finally:
+                    driver.close()
+                    driver.switch_to.window(current_window)
+            
+            # 对于其他链接，尝试通用方法（限制避免过度请求）
+            # 这里我们暂时不处理，避免打开太多页面影响性能
+            
+        except Exception as e:
+            print(f"    ⚠️ 获取完整摘要失败: {str(e)}")
+        
+        return None
 
 
 class SearchManager:
@@ -472,9 +602,44 @@ class SearchManager:
             'openreview': OpenReviewSearchEngine(),
             'google_scholar': GoogleScholarSearchEngine()
         }
+    
+    def _filter_paper(self, paper: Paper, exclude_keywords: list, require_keywords: list) -> bool:
+        """智能过滤论文
+        
+        Args:
+            paper: 论文对象
+            exclude_keywords: 排除关键词列表
+            require_keywords: 必需关键词列表
+            
+        Returns:
+            True表示保留，False表示过滤掉
+        """
+        # 合并标题和摘要用于检查
+        content = (paper.title + ' ' + paper.abstract).lower()
+        
+        # 检查排除关键词
+        if exclude_keywords:
+            for keyword in exclude_keywords:
+                if keyword.lower() in content:
+                    print(f"  🚫 过滤掉: {paper.title[:60]}... (包含排除词: {keyword})")
+                    return False
+        
+        # 检查必需关键词
+        if require_keywords:
+            has_required = False
+            for keyword in require_keywords:
+                if keyword.lower() in content:
+                    has_required = True
+                    break
+            if not has_required:
+                print(f"  🚫 过滤掉: {paper.title[:60]}... (缺少必需关键词)")
+                return False
+        
+        return True
         
     def search_all(self, keywords: str, start_date: Optional[str] = None,
-                   end_date: Optional[str] = None, sources: List[str] = None) -> List[Paper]:
+                   end_date: Optional[str] = None, sources: List[str] = None,
+                   exclude_keywords: List[str] = None, require_keywords: List[str] = None) -> List[Paper]:
         """
         在所有选定的搜索引擎上搜索
         
@@ -483,12 +648,30 @@ class SearchManager:
             start_date: 开始日期
             end_date: 结束日期
             sources: 要搜索的来源列表，默认全部
+            exclude_keywords: 排除关键词列表
+            require_keywords: 必需关键词列表
             
         Returns:
             所有搜索结果的合并列表
         """
         if sources is None:
             sources = list(self.engines.keys())
+        
+        # 从Config获取过滤设置
+        if exclude_keywords is None:
+            exclude_keywords = Config.EXCLUDE_KEYWORDS
+        if require_keywords is None:
+            require_keywords = Config.REQUIRE_KEYWORDS
+        
+        enable_filter = Config.ENABLE_SMART_FILTER and (exclude_keywords or require_keywords)
+        
+        if enable_filter:
+            print(f"\n🎯 智能过滤已启用:")
+            if exclude_keywords:
+                print(f"   排除关键词: {', '.join(exclude_keywords)}")
+            if require_keywords:
+                print(f"   必需关键词: {', '.join(require_keywords)}")
+            print()
             
         all_papers = []
         
@@ -496,6 +679,15 @@ class SearchManager:
             if source in self.engines:
                 print(f"正在搜索 {source}...")
                 papers = self.engines[source].search(keywords, start_date, end_date)
+                
+                # 应用智能过滤
+                if enable_filter:
+                    original_count = len(papers)
+                    papers = [p for p in papers if self._filter_paper(p, exclude_keywords, require_keywords)]
+                    filtered_count = original_count - len(papers)
+                    if filtered_count > 0:
+                        print(f"  ✅ 过滤掉 {filtered_count} 篇不相关论文")
+                
                 all_papers.extend(papers)
                 print(f"从 {source} 找到 {len(papers)} 篇论文")
                 
